@@ -4,9 +4,9 @@ mod llm;
 mod tools;
 
 use crate::config::Config;
-use crate::llm::{LLMClient, ToolCall, ToolResponse};
+use crate::llm::{LLMClient, ToolResponse};
 use crate::tools::ToolRegistry;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use clap::Parser;
 use std::io::{self, Read};
 
@@ -85,8 +85,8 @@ fn main() -> Result<()> {
         client.chat_completion(&system_prompt, &user_message, &tool_descriptions)?;
 
     if let Some(calls) = tool_calls {
+        // Формируем сообщения для следующего запроса
         let messages = vec![
-            // убрали mut
             serde_json::json!({"role": "system", "content": system_prompt}),
             serde_json::json!({"role": "user", "content": user_message}),
             serde_json::json!({
@@ -107,7 +107,13 @@ fn main() -> Result<()> {
 
         let mut tool_responses = Vec::new();
         for call in calls {
-            let output = tool_registry.execute(&call.name, &call.arguments, &config)?;
+            // Передаём опции текущего бэкенда
+            let output = tool_registry.execute(
+                &call.name,
+                &call.arguments,
+                &config,
+                backend.options.as_ref(), // передаём опции
+            )?;
             tool_responses.push(ToolResponse {
                 tool_call_id: call.id,
                 output: output.content.clone(),

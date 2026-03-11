@@ -1,5 +1,4 @@
 use anyhow::Result;
-use blake3::Hash;
 use std::fs;
 use std::path::PathBuf;
 

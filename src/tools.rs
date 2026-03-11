@@ -1,7 +1,8 @@
 use crate::config::{Config, ToolExecution};
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::io::Write;
 use std::process::Command;
 
 pub struct ToolOutput {
@@ -9,7 +10,8 @@ pub struct ToolOutput {
     pub details: Option<String>,
 }
 
-type BuiltinFn = fn(&Value, &Config) -> Result<ToolOutput>;
+
+type BuiltinFn = fn(&Value, &Config, Option<&serde_json::Map<String, Value>>) -> Result<ToolOutput>;
 
 struct BuiltinTool {
     name: &'static str,
@@ -33,7 +35,6 @@ impl ToolRegistry {
     pub fn new(config: &Config) -> Self {
         let mut builtins = HashMap::new();
 
-        // Список встроенных инструментов создаём напрямую, без макроса
         let builtins_list = vec![
             BuiltinTool {
                 name: "calculator",
@@ -52,7 +53,8 @@ impl ToolRegistry {
             },
             BuiltinTool {
                 name: "run_shell",
-                description: "Выполняет команду в оболочке (осторожно!). Принимает команду строкой.",
+                description:
+                    "Выполняет команду в оболочке (осторожно!). Принимает команду строкой.",
                 schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -134,10 +136,18 @@ impl ToolRegistry {
         descriptions
     }
 
-    pub fn execute(&self, name: &str, args: &Value, config: &Config) -> Result<ToolOutput> {
+    // Добавляем параметр backend_options
+    pub fn execute(
+        &self,
+        name: &str,
+        args: &Value,
+        config: &Config,
+        backend_options: Option<&serde_json::Map<String, Value>>,
+    ) -> Result<ToolOutput> {
         if let Some(builtin) = self.builtins.get(name) {
-            (builtin.func)(args, config)
+            (builtin.func)(args, config, backend_options)
         } else if let Some(external) = self.externals.get(name) {
+            // Внешние инструменты пока не используют опции бэкенда, но можно передать, если нужно
             execute_external(&external.execution, args)
         } else {
             Err(anyhow!("Инструмент '{}' не найден", name))
@@ -174,8 +184,6 @@ fn execute_external(execution: &ToolExecution, args: &Value) -> Result<ToolOutpu
             params: _,
         } => {
             let client = reqwest::blocking::Client::new();
-            // Упрощённо: просто GET-запрос по указанному URL
-            // TODO: поддержка method, headers, подстановка параметров
             let resp = client.get(url).send()?;
             let text = resp.text()?;
             Ok(ToolOutput {
@@ -201,7 +209,11 @@ fn execute_external(execution: &ToolExecution, args: &Value) -> Result<ToolOutpu
 
 // ---------- Встроенные инструменты ----------
 
-fn calculator_tool(args: &Value, _config: &Config) -> Result<ToolOutput> {
+fn calculator_tool(
+    args: &Value,
+    _config: &Config,
+    _backend_options: Option<&serde_json::Map<String, Value>>,
+) -> Result<ToolOutput> {
     let expression = args
         .get("expression")
         .and_then(|v| v.as_str())
@@ -215,13 +227,17 @@ fn calculator_tool(args: &Value, _config: &Config) -> Result<ToolOutput> {
     })
 }
 
-fn run_shell_tool(args: &Value, config: &Config) -> Result<ToolOutput> {
+fn run_shell_tool(
+    args: &Value,
+    config: &Config,
+    backend_options: Option<&serde_json::Map<String, Value>>,
+) -> Result<ToolOutput> {
     let command = args
         .get("command")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("Не указана команда (поле 'command')"))?;
 
-    // проверка стоп-листа
+    // Проверка по стоп-листу
     if let Some(stop_list) = &config.stop_list {
         for pattern in stop_list {
             if command.contains(pattern) {
@@ -233,6 +249,25 @@ fn run_shell_tool(args: &Value, config: &Config) -> Result<ToolOutput> {
         }
     }
 
+    // Определяем, нужно ли подтверждение (по умолчанию true)
+    let confirm_shell = backend_options
+        .and_then(|opts| opts.get("confirm_shell"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    if confirm_shell {
+        eprintln!("\n⚠️  Команда для выполнения: {}", command);
+        eprint!("Подтвердите выполнение [y/N]: ");
+        std::io::stdout().flush()?; // обязательно flush, чтобы приглашение появилось
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            return Err(anyhow!("Выполнение отменено пользователем"));
+        }
+    }
+
+    // Выполняем команду
     let output = Command::new("sh")
         .arg("-c")
         .arg(command)
@@ -252,7 +287,11 @@ fn run_shell_tool(args: &Value, config: &Config) -> Result<ToolOutput> {
     })
 }
 
-fn current_time_tool(_args: &Value, _config: &Config) -> Result<ToolOutput> {
+fn current_time_tool(
+    _args: &Value,
+    _config: &Config,
+    _backend_options: Option<&serde_json::Map<String, Value>>,
+) -> Result<ToolOutput> {
     let now = chrono::Local::now();
     Ok(ToolOutput {
         content: now.format("%Y-%m-%d %H:%M:%S").to_string(),

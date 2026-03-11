@@ -49,8 +49,9 @@ impl LLMClient {
             "messages": messages,
         });
 
+        // Исправление: преобразуем Map в Value::Object
         if let Some(options) = &self.backend.options {
-            request_body["options"] = options.clone();
+            request_body["options"] = Value::Object(options.clone());
         }
 
         if !tool_descriptions.is_empty() {
@@ -118,8 +119,9 @@ impl LLMClient {
             "messages": messages,
         });
 
+        // Исправление здесь тоже
         if let Some(options) = &self.backend.options {
-            request_body["options"] = options.clone();
+            request_body["options"] = Value::Object(options.clone());
         }
 
         let mut req = self.client.post(&self.backend.api_url).json(&request_body);

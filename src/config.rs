@@ -9,7 +9,7 @@ pub struct Backend {
     pub api_key: Option<String>,
     pub model: String,
     pub timeout_secs: Option<u64>,
-    pub options: Option<serde_json::Value>, // новое поле
+    pub options: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -56,6 +56,11 @@ impl Config {
             .join("config.toml");
 
         if !config_path.exists() {
+            // Создаём конфиг по умолчанию
+            let mut default_options = serde_json::Map::new();
+            default_options.insert("nothink".to_string(), serde_json::Value::Bool(true));
+            default_options.insert("confirm_shell".to_string(), serde_json::Value::Bool(true)); // по умолчанию спрашиваем
+
             let default = Config {
                 default_prompt: Some("Ты — полезный ассистент. Отвечай кратко и по делу.".into()),
                 explain_language: Some("ru".into()),
@@ -64,29 +69,10 @@ impl Config {
                     api_url: "http://localhost:11434/v1/chat/completions".into(),
                     api_key: None,
                     model: "qwen3.5:0.8b".into(),
-                    timeout_secs: Some(30),
-                    options: Some(serde_json::json!({ "nothink": true })), // пример
+                    timeout_secs: Some(60),
+                    options: Some(default_options),
                 }],
-                tools: Some(vec![
-                    // Пример внешнего инструмента (раскомментируйте для использования)
-                    // Tool {
-                    //     name: "weather".into(),
-                    //     description: "Получить погоду для города".into(),
-                    //     schema: serde_json::json!({
-                    //         "type": "object",
-                    //         "properties": {
-                    //             "city": {"type": "string"}
-                    //         },
-                    //         "required": ["city"]
-                    //     }),
-                    //     execution: Some(ToolExecution::ApiCall {
-                    //         url: "https://wttr.in/{city}?format=%t".into(),
-                    //         method: Some("GET".into()),
-                    //         headers: None,
-                    //         params: None,
-                    //     }),
-                    // }
-                ]),
+                tools: Some(vec![]),
             };
             let toml_string = toml::to_string_pretty(&default)?;
             fs::create_dir_all(config_path.parent().unwrap())?;
