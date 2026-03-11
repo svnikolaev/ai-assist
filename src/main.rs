@@ -12,17 +12,13 @@ use std::io::{self, Read};
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Запрос на естественном языке
+    /// Запрос на естественном языке (можно передать несколько слов без кавычек)
     #[arg(required = false)]
-    query: Option<String>,
+    query: Vec<String>,
 
     /// Показать объяснение (расширенный вывод)
     #[arg(short, long)]
     explain: bool,
-
-    /// Игнорировать кэш (флаг оставлен для совместимости, но больше не используется)
-    #[arg(short, long)]
-    no_cache: bool,
 
     /// Системный промпт (переопределяет default_prompt из конфига)
     #[arg(short, long)]
@@ -38,14 +34,15 @@ fn main() -> Result<()> {
         .or(config.default_prompt.clone())
         .unwrap_or_else(|| "Ты полезный ассистент.".to_string());
 
-    let user_message = if let Some(q) = args.query {
-        q
+    // Формируем запрос: объединяем все слова, если они есть, иначе читаем из stdin
+    let user_message = if !args.query.is_empty() {
+        args.query.join(" ")
     } else {
         let mut buffer = String::new();
         io::stdin().read_to_string(&mut buffer)?;
         if buffer.is_empty() {
             eprintln!(
-                "Ошибка: не указан запрос. Используйте: ai-assist \"вопрос\" или через pipe."
+                "Ошибка: не указан запрос. Используйте: ask вопрос без кавычек, ask \"вопрос в кавычках\", или передайте текст через pipe."
             );
             std::process::exit(1);
         }
