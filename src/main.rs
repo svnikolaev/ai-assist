@@ -1,4 +1,3 @@
-mod cache;
 mod config;
 mod llm;
 mod tools;
@@ -6,7 +5,7 @@ mod tools;
 use crate::config::Config;
 use crate::llm::{LLMClient, ToolResponse};
 use crate::tools::ToolRegistry;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::Parser;
 use std::io::{self, Read};
 
@@ -21,7 +20,7 @@ struct Args {
     #[arg(short, long)]
     explain: bool,
 
-    /// Игнорировать кэш
+    /// Игнорировать кэш (флаг оставлен для совместимости, но больше не используется)
     #[arg(short, long)]
     no_cache: bool,
 
@@ -53,25 +52,6 @@ fn main() -> Result<()> {
         buffer.trim().to_string()
     };
 
-    let cache_key = if !args.no_cache && !config.backends.is_empty() {
-        let backend_model = &config.backends[0].model;
-        Some(format!(
-            "{}||{}||{}",
-            system_prompt, user_message, backend_model
-        ))
-    } else {
-        None
-    };
-
-    if let Some(key) = &cache_key {
-        if let Ok(cache) = cache::Cache::new() {
-            if let Some(cached) = cache.get(key) {
-                println!("{}", cached);
-                return Ok(());
-            }
-        }
-    }
-
     let backend = config
         .backends
         .first()
@@ -85,7 +65,6 @@ fn main() -> Result<()> {
         client.chat_completion(&system_prompt, &user_message, &tool_descriptions)?;
 
     if let Some(calls) = tool_calls {
-        // Формируем сообщения для следующего запроса
         let messages = vec![
             serde_json::json!({"role": "system", "content": system_prompt}),
             serde_json::json!({"role": "user", "content": user_message}),
@@ -107,12 +86,11 @@ fn main() -> Result<()> {
 
         let mut tool_responses = Vec::new();
         for call in calls {
-            // Передаём опции текущего бэкенда
             let output = tool_registry.execute(
                 &call.name,
                 &call.arguments,
                 &config,
-                backend.options.as_ref(), // передаём опции
+                backend.options.as_ref(),
             )?;
             tool_responses.push(ToolResponse {
                 tool_call_id: call.id,
@@ -135,12 +113,6 @@ fn main() -> Result<()> {
             println!("🤖 Ответ:\n{}", answer);
         } else {
             println!("{}", answer);
-        }
-
-        if let Some(key) = cache_key {
-            if let Ok(cache) = cache::Cache::new() {
-                let _ = cache.put(&key, &answer);
-            }
         }
     } else {
         eprintln!("Модель не вернула ответ.");
