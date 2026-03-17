@@ -1,6 +1,7 @@
 mod config;
 mod llm;
 mod tools;
+mod memory;
 
 use crate::config::Config;
 use crate::llm::{LLMClient, ToolResponse};
@@ -28,6 +29,11 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     let config = Config::load()?;
+
+    // Инициализация памяти
+    if let Err(e) = memory::init(config.memory.as_ref()) {
+        eprintln!("Warning: failed to initialize memory: {}", e);
+    }
 
     let system_prompt = args
         .prompt

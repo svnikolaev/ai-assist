@@ -1,4 +1,5 @@
 use crate::config::{Config, ToolExecution};
+use crate::memory;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -9,7 +10,6 @@ pub struct ToolOutput {
     pub content: String,
     pub details: Option<String>,
 }
-
 
 type BuiltinFn = fn(&Value, &Config, Option<&serde_json::Map<String, Value>>) -> Result<ToolOutput>;
 
@@ -31,183 +31,125 @@ pub struct ToolRegistry {
     externals: HashMap<String, ExternalTool>,
 }
 
-impl ToolRegistry {
-    pub fn new(config: &Config) -> Self {
-        let mut builtins = HashMap::new();
-
-        let builtins_list = vec![
-            BuiltinTool {
-                name: "calculator",
-                description: "Выполняет математические вычисления. Используй для арифметики.",
-                schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "expression": {
-                            "type": "string",
-                            "description": "Выражение для вычисления (например, '2+2*3')"
-                        }
-                    },
-                    "required": ["expression"]
-                }),
-                func: calculator_tool,
-            },
-            BuiltinTool {
-                name: "run_shell",
-                description:
-                    "Выполняет команду в оболочке (осторожно!). Принимает команду строкой.",
-                schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "Команда для выполнения"
-                        }
-                    },
-                    "required": ["command"]
-                }),
-                func: run_shell_tool,
-            },
-            BuiltinTool {
-                name: "current_time",
-                description: "Возвращает текущие дату и время.",
-                schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {}
-                }),
-                func: current_time_tool,
-            },
-        ];
-
-        for tool in builtins_list {
-            builtins.insert(tool.name.to_string(), tool);
-        }
-
-        let mut externals = HashMap::new();
-        if let Some(tools) = &config.tools {
-            for tool in tools {
-                if let Some(execution) = &tool.execution {
-                    if builtins.contains_key(&tool.name) {
-                        eprintln!(
-                            "Предупреждение: внешний инструмент '{}' конфликтует со встроенным и будет проигнорирован.",
-                            tool.name
-                        );
-                        continue;
-                    }
-                    externals.insert(
-                        tool.name.clone(),
-                        ExternalTool {
-                            description: tool.description.clone(),
-                            schema: tool.schema.clone(),
-                            execution: execution.clone(),
-                        },
-                    );
-                }
-            }
-        }
-
-        ToolRegistry {
-            builtins,
-            externals,
-        }
+// ---------- Вспомогательная функция для эмбеддингов (временная заглушка) ----------
+fn get_embedding(text: &str, dim: usize) -> Vec<f32> {
+    // TODO: заменить на реальный вызов модели эмбеддингов (например, через Ollama /api/embeddings)
+    let mut result = Vec::with_capacity(dim);
+    let bytes = text.as_bytes();
+    for i in 0..dim {
+        let b = bytes.get(i % bytes.len()).copied().unwrap_or(0) as f32;
+        result.push(b / 255.0 * 2.0 - 1.0);
     }
+    result
+}
 
-    pub fn tool_descriptions(&self) -> Vec<Value> {
-        let mut descriptions = Vec::new();
-        for tool in self.builtins.values() {
-            descriptions.push(serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.schema,
-                }
-            }));
-        }
-        for (name, tool) in &self.externals {
-            descriptions.push(serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": tool.description,
-                    "parameters": tool.schema,
-                }
-            }));
-        }
-        descriptions
-    }
+// ---------- Инструменты для работы с памятью ----------
 
-    // Добавляем параметр backend_options
-    pub fn execute(
-        &self,
-        name: &str,
-        args: &Value,
-        config: &Config,
-        backend_options: Option<&serde_json::Map<String, Value>>,
-    ) -> Result<ToolOutput> {
-        if let Some(builtin) = self.builtins.get(name) {
-            (builtin.func)(args, config, backend_options)
-        } else if let Some(external) = self.externals.get(name) {
-            // Внешние инструменты пока не используют опции бэкенда, но можно передать, если нужно
-            execute_external(&external.execution, args)
-        } else {
-            Err(anyhow!("Инструмент '{}' не найден", name))
-        }
+fn remember_tool(
+    args: &Value,
+    _config: &Config,
+    _backend_options: Option<&serde_json::Map<String, Value>>,
+) -> Result<ToolOutput> {
+    let memory = memory::get().ok_or_else(|| anyhow!("Memory not initialized"))?;
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Missing 'id'"))?;
+    let content = args
+        .get("content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Missing 'content'"))?;
+    let metadata = args.get("metadata").and_then(|v| v.as_str());
+    let embedding = get_embedding(content, memory.embedding_dim);
+    memory.insert(id, content, embedding, metadata)?;
+    Ok(ToolOutput {
+        content: format!("Remembered '{}'", id),
+        details: None,
+    })
+}
+
+fn recall_tool(
+    args: &Value,
+    _config: &Config,
+    _backend_options: Option<&serde_json::Map<String, Value>>,
+) -> Result<ToolOutput> {
+    let memory = memory::get().ok_or_else(|| anyhow!("Memory not initialized"))?;
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Missing 'id'"))?;
+    match memory.get(id)? {
+        Some(entry) => Ok(ToolOutput {
+            content: entry.content,
+            details: entry.metadata,
+        }),
+        None => Err(anyhow!("No memory with id '{}'", id)),
     }
 }
 
-fn execute_external(execution: &ToolExecution, args: &Value) -> Result<ToolOutput> {
-    match execution {
-        ToolExecution::Command { command } => {
-            let mut cmd_str = command.clone();
-            if let Some(args_obj) = args.as_object() {
-                for (key, val) in args_obj {
-                    let placeholder = format!("{{{}}}", key);
-                    let val_str = val.as_str().unwrap_or(&val.to_string()).to_string();
-                    cmd_str = cmd_str.replace(&placeholder, &val_str);
-                }
-            }
-            let output = Command::new("sh").arg("-c").arg(&cmd_str).output()?;
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            if !stderr.is_empty() {
-                eprintln!("[external tool stderr]: {}", stderr);
-            }
-            Ok(ToolOutput {
-                content: stdout,
-                details: Some(format!("Команда выполнена, код выхода: {}", output.status)),
-            })
-        }
-        ToolExecution::ApiCall {
-            url,
-            method: _,
-            headers: _,
-            params: _,
-        } => {
-            let client = reqwest::blocking::Client::new();
-            let resp = client.get(url).send()?;
-            let text = resp.text()?;
-            Ok(ToolOutput {
-                content: text,
-                details: None,
-            })
-        }
-        ToolExecution::Script { path, interpreter } => {
-            let interpreter = interpreter.as_deref().unwrap_or("sh");
-            let output = Command::new(interpreter).arg(path).output()?;
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            if !stderr.is_empty() {
-                eprintln!("[external script stderr]: {}", stderr);
-            }
-            Ok(ToolOutput {
-                content: stdout,
-                details: Some(format!("Скрипт выполнен, код выхода: {}", output.status)),
-            })
-        }
-    }
+fn search_memory_tool(
+    args: &Value,
+    _config: &Config,
+    _backend_options: Option<&serde_json::Map<String, Value>>,
+) -> Result<ToolOutput> {
+    let memory = memory::get().ok_or_else(|| anyhow!("Memory not initialized"))?;
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Missing 'query'"))?;
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5) as usize;
+    let embedding = get_embedding(query, memory.embedding_dim);
+    let results = memory.search_similar(embedding, limit)?;
+    let output = results
+        .iter()
+        .map(|e| format!("{}: {} (dist: {:.3})", e.id, e.content, e.distance))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(ToolOutput {
+        content: output,
+        details: None,
+    })
 }
 
-// ---------- Встроенные инструменты ----------
+fn forget_tool(
+    args: &Value,
+    _config: &Config,
+    _backend_options: Option<&serde_json::Map<String, Value>>,
+) -> Result<ToolOutput> {
+    let memory = memory::get().ok_or_else(|| anyhow!("Memory not initialized"))?;
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Missing 'id'"))?;
+    memory.delete(id)?;
+    Ok(ToolOutput {
+        content: format!("Forgot '{}'", id),
+        details: None,
+    })
+}
+
+fn list_memories_tool(
+    _args: &Value,
+    _config: &Config,
+    _backend_options: Option<&serde_json::Map<String, Value>>,
+) -> Result<ToolOutput> {
+    let memory = memory::get().ok_or_else(|| anyhow!("Memory not initialized"))?;
+    let entries = memory.list_all()?;
+    let output = entries
+        .iter()
+        .map(|e| format!("{}: {}", e.id, e.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(ToolOutput {
+        content: output,
+        details: None,
+    })
+}
+
+// ---------- Существующие инструменты ----------
 
 fn calculator_tool(
     args: &Value,
@@ -297,4 +239,239 @@ fn current_time_tool(
         content: now.format("%Y-%m-%d %H:%M:%S").to_string(),
         details: None,
     })
+}
+
+impl ToolRegistry {
+    pub fn new(config: &Config) -> Self {
+        let mut builtins = HashMap::new();
+
+        let builtins_list = vec![
+            BuiltinTool {
+                name: "calculator",
+                description: "Выполняет математические вычисления. Используй для арифметики.",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "expression": {
+                            "type": "string",
+                            "description": "Выражение для вычисления (например, '2+2*3')"
+                        }
+                    },
+                    "required": ["expression"]
+                }),
+                func: calculator_tool,
+            },
+            BuiltinTool {
+                name: "run_shell",
+                description:
+                    "Выполняет команду в оболочке (осторожно!). Принимает команду строкой.",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Команда для выполнения"
+                        }
+                    },
+                    "required": ["command"]
+                }),
+                func: run_shell_tool,
+            },
+            BuiltinTool {
+                name: "current_time",
+                description: "Возвращает текущие дату и время.",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                func: current_time_tool,
+            },
+            // Новые инструменты для памяти
+            BuiltinTool {
+                name: "remember",
+                description: "Сохраняет факт в долговременную память по ключу (id) и содержимому. Принимает id, content и опционально metadata.",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Уникальный идентификатор"},
+                        "content": {"type": "string", "description": "Текст для запоминания"},
+                        "metadata": {"type": "string", "description": "Дополнительная информация (опционально)"}
+                    },
+                    "required": ["id", "content"]
+                }),
+                func: remember_tool,
+            },
+            BuiltinTool {
+                name: "recall",
+                description: "Извлекает факт из памяти по id.",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Идентификатор факта"}
+                    },
+                    "required": ["id"]
+                }),
+                func: recall_tool,
+            },
+            BuiltinTool {
+                name: "search_memory",
+                description: "Ищет в памяти по смыслу. Возвращает похожие записи.",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Текст запроса"},
+                        "limit": {"type": "integer", "description": "Максимальное количество результатов (по умолчанию 5)"}
+                    },
+                    "required": ["query"]
+                }),
+                func: search_memory_tool,
+            },
+            BuiltinTool {
+                name: "forget",
+                description: "Удаляет факт из памяти по id.",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Идентификатор факта"}
+                    },
+                    "required": ["id"]
+                }),
+                func: forget_tool,
+            },
+            BuiltinTool {
+                name: "list_memories",
+                description: "Перечисляет все сохранённые факты (id и содержимое).",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                func: list_memories_tool,
+            },
+        ];
+
+        for tool in builtins_list {
+            builtins.insert(tool.name.to_string(), tool);
+        }
+
+        let mut externals = HashMap::new();
+        if let Some(tools) = &config.tools {
+            for tool in tools {
+                if let Some(execution) = &tool.execution {
+                    if builtins.contains_key(&tool.name) {
+                        eprintln!(
+                            "Предупреждение: внешний инструмент '{}' конфликтует со встроенным и будет проигнорирован.",
+                            tool.name
+                        );
+                        continue;
+                    }
+                    externals.insert(
+                        tool.name.clone(),
+                        ExternalTool {
+                            description: tool.description.clone(),
+                            schema: tool.schema.clone(),
+                            execution: execution.clone(),
+                        },
+                    );
+                }
+            }
+        }
+
+        ToolRegistry {
+            builtins,
+            externals,
+        }
+    }
+
+    pub fn tool_descriptions(&self) -> Vec<Value> {
+        let mut descriptions = Vec::new();
+        for tool in self.builtins.values() {
+            descriptions.push(serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.schema,
+                }
+            }));
+        }
+        for (name, tool) in &self.externals {
+            descriptions.push(serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": tool.description,
+                    "parameters": tool.schema,
+                }
+            }));
+        }
+        descriptions
+    }
+
+    pub fn execute(
+        &self,
+        name: &str,
+        args: &Value,
+        config: &Config,
+        backend_options: Option<&serde_json::Map<String, Value>>,
+    ) -> Result<ToolOutput> {
+        if let Some(builtin) = self.builtins.get(name) {
+            (builtin.func)(args, config, backend_options)
+        } else if let Some(external) = self.externals.get(name) {
+            execute_external(&external.execution, args)
+        } else {
+            Err(anyhow!("Инструмент '{}' не найден", name))
+        }
+    }
+}
+
+fn execute_external(execution: &ToolExecution, args: &Value) -> Result<ToolOutput> {
+    match execution {
+        ToolExecution::Command { command } => {
+            let mut cmd_str = command.clone();
+            if let Some(args_obj) = args.as_object() {
+                for (key, val) in args_obj {
+                    let placeholder = format!("{{{}}}", key);
+                    let val_str = val.as_str().unwrap_or(&val.to_string()).to_string();
+                    cmd_str = cmd_str.replace(&placeholder, &val_str);
+                }
+            }
+            let output = Command::new("sh").arg("-c").arg(&cmd_str).output()?;
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            if !stderr.is_empty() {
+                eprintln!("[external tool stderr]: {}", stderr);
+            }
+            Ok(ToolOutput {
+                content: stdout,
+                details: Some(format!("Команда выполнена, код выхода: {}", output.status)),
+            })
+        }
+        ToolExecution::ApiCall {
+            url,
+            method: _,
+            headers: _,
+            params: _,
+        } => {
+            let client = reqwest::blocking::Client::new();
+            let resp = client.get(url).send()?;
+            let text = resp.text()?;
+            Ok(ToolOutput {
+                content: text,
+                details: None,
+            })
+        }
+        ToolExecution::Script { path, interpreter } => {
+            let interpreter = interpreter.as_deref().unwrap_or("sh");
+            let output = Command::new(interpreter).arg(path).output()?;
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            if !stderr.is_empty() {
+                eprintln!("[external script stderr]: {}", stderr);
+            }
+            Ok(ToolOutput {
+                content: stdout,
+                details: Some(format!("Скрипт выполнен, код выхода: {}", output.status)),
+            })
+        }
+    }
 }
