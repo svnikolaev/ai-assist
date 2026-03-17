@@ -39,6 +39,13 @@ pub struct Tool {
     pub execution: Option<ToolExecution>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct MemoryConfig {
+    pub db_path: Option<String>,
+    pub embedding_dim: Option<usize>,
+    pub obsidian_vault: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub default_prompt: Option<String>,
@@ -46,6 +53,7 @@ pub struct Config {
     pub stop_list: Option<Vec<String>>,
     pub backends: Vec<Backend>,
     pub tools: Option<Vec<Tool>>,
+    pub memory: Option<MemoryConfig>,
 }
 
 impl Config {
@@ -59,7 +67,7 @@ impl Config {
             // Создаём конфиг по умолчанию
             let mut default_options = serde_json::Map::new();
             default_options.insert("nothink".to_string(), serde_json::Value::Bool(true));
-            default_options.insert("confirm_shell".to_string(), serde_json::Value::Bool(true)); // по умолчанию спрашиваем
+            default_options.insert("confirm_shell".to_string(), serde_json::Value::Bool(true));
 
             let default = Config {
                 default_prompt: Some("Ты — полезный ассистент. Отвечай кратко и по делу.".into()),
@@ -73,6 +81,18 @@ impl Config {
                     options: Some(default_options),
                 }],
                 tools: Some(vec![]),
+                memory: Some(MemoryConfig {
+                    db_path: Some(
+                        dirs::config_dir()
+                            .unwrap()
+                            .join("ai-assist/memory.db")
+                            .to_str()
+                            .unwrap()
+                            .to_string(),
+                    ),
+                    embedding_dim: Some(384),
+                    obsidian_vault: None,
+                }),
             };
             let toml_string = toml::to_string_pretty(&default)?;
             fs::create_dir_all(config_path.parent().unwrap())?;
